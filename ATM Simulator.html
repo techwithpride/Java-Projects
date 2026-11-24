@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ATM Simulator</title>
+<style>
+:root{
+  --bg:#eef1f6;--panel:#d9dee8;--screen:#0f2a44;--screen-text:#e8f4ff;--accent:#2fbf71;
+  --btn:#ffffff;--btn-text:#16202e;--border:#b8c1d1;--text:#16202e;--muted:#9fb6cc;
+  color-scheme:light;box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e131b;--panel:#1a2230;--screen:#0a1b2e;--screen-text:#e8f4ff;--accent:#2fbf71;
+    --btn:#263247;--btn-text:#eaf0fa;--border:#38465e;--text:#eaf0fa;--muted:#9fb6cc;color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e131b;--panel:#1a2230;--screen:#0a1b2e;--screen-text:#e8f4ff;--accent:#2fbf71;
+  --btn:#263247;--btn-text:#eaf0fa;--border:#38465e;--text:#eaf0fa;--muted:#9fb6cc;color-scheme:dark;
+}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:480px;margin:0 auto;padding:16px}
+.atm{background:var(--panel);border-radius:20px;padding:14px;border:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;padding:4px 6px 12px}
+.brand small{margin-left:auto;font-weight:400;color:var(--muted)}
+.screen{background:var(--screen);color:var(--screen-text);border-radius:12px;padding:16px;min-height:340px}
+h2{margin:0 0 8px;font-size:20px}
+.msg{min-height:22px;margin-bottom:8px;font-size:14px}
+.msg.ok{color:#7ee2a8}.msg.err{color:#ff9b9b}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+input{width:100%;padding:12px;border-radius:8px;border:1px solid var(--border);background:var(--btn);color:var(--btn-text);font-size:16px}
+.btn{display:block;width:100%;padding:12px;margin:8px 0;border-radius:10px;border:1px solid var(--border);background:var(--btn);color:var(--btn-text);font-size:16px;cursor:pointer}
+.btn.primary{background:var(--accent);color:#06210f;border-color:transparent;font-weight:600}
+.btn.small{font-size:13px;padding:8px;opacity:.8}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+.note{color:var(--muted);font-size:13px;margin:12px 0 0}
+.big{font-size:32px;font-weight:700;margin:12px 0}
+.card{background:rgba(255,255,255,.08);border-radius:10px;padding:12px;margin:8px 0;font-size:15px;line-height:1.6}
+.card b{font-size:20px;letter-spacing:2px}
+.hist{overflow:auto;max-height:280px;border-radius:8px}
+table{border-collapse:collapse;width:100%;min-width:420px;font-size:12.5px}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid rgba(255,255,255,.12);white-space:nowrap}
+td.n,th.n{text-align:right}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="atm">
+    <div class="brand"><span>🏧</span><span>Java ATM Simulator</span><small>runs in your browser</small></div>
+    <div class="screen" id="screen"></div>
+  </div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const MAX_ATTEMPTS = 3, MAX_WITHDRAW = 20000, NOTE = 100, DEMO = "100000000001";
+let accounts = {}, cur = null, view = "home", msg = "", msgT = "", lastCard = "";
+
+const money = n => "₹" + Number(n).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const p2 = n => String(n).padStart(2, "0");
+function stamp(){const d=new Date();return `${p2(d.getDate())}-${p2(d.getMonth()+1)}-${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`}
+
+function load(){try{const r=localStorage.getItem("atm_accounts");if(r)accounts=JSON.parse(r)}catch(e){}}
+function save(){try{localStorage.setItem("atm_accounts",JSON.stringify(accounts))}catch(e){}}
+
+// PIN is never stored as plain text: SHA-256 with the card number as salt
+async function hash(card, pin){
+  const data = new TextEncoder().encode(card + pin);
+  try{
+    if(window.crypto && crypto.subtle){
+      const b = await crypto.subtle.digest("SHA-256", data);
+      return Array.from(new Uint8Array(b), x => x.toString(16).padStart(2, "0")).join("");
+    }
+  }catch(e){}
+  return "p" + btoa(card + pin);
+}
+
+function log(a, type, amt){a.history.push({t: stamp(), type, amt, bal: a.balance})}
+
+function newCard(){
+  let c;
+  do{const r=new Uint32Array(11);crypto.getRandomValues(r);c="4"+Array.from(r,x=>x%10).join("")}while(accounts[c]);
+  return c;
+}
+
+async function seed(){
+  const a={card:DEMO,name:"Demo User",pinHash:await hash(DEMO,"1234"),balance:5000,failed:0,locked:false,history:[]};
+  log(a,"OPENING DEPOSIT",5000);accounts[DEMO]=a;save();
+}
+
+function go(v, m, t){view=v;msg=m||"";msgT=t||"ok";render()}
+function flash(m, t){const e=$("#msg");e.className="msg "+(t||"err");e.textContent=m}
+
+const views = {
+  home: () => ({title:"Welcome", body:`
+    <button class="btn primary" onclick="go('gen')">Generate new ATM card</button>
+    <button class="btn" onclick="go('login')">Insert card (login)</button>
+    <p class="note">Demo card: ${DEMO} · PIN: 1234</p>
+    <button class="btn small" onclick="resetAll()">Reset all data</button>`}),
+
+  gen: () => ({title:"Generate new ATM card", body:`
+    <label>Account holder name</label><input id="name" autocomplete="off">
+    <label>Set a 4-digit PIN</label><input id="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off">
+    <label>Opening deposit (₹)</label><input id="amt" type="number" inputmode="decimal" min="1">
+    <button class="btn primary" onclick="doGen()">Generate card</button>
+    <button class="btn" onclick="go('home')">Back</button>`}),
+
+  generated: () => {const a=accounts[lastCard];return {title:"Card generated", body:`
+    <div class="card">Holder: ${esc(a.name)}<br>Card number:<br><b>${a.card}</b><br>Balance: ${money(a.balance)}</div>
+    <p class="note">Keep your card number safe. You need it to log in.</p>
+    <button class="btn primary" onclick="go('login')">Go to login</button>`}},
+
+  login: () => ({title:"Insert card", body:`
+    <label>Card number</label><input id="card" inputmode="numeric" maxlength="12" value="${esc(lastCard)}" autocomplete="off">
+    <label>PIN</label><input id="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off">
+    <button class="btn primary" onclick="doLogin()">Login</button>
+    <button class="btn" onclick="go('home')">Back</button>`}),
+
+  menu: () => ({title:"Hello, " + esc(cur.name), body:`
+    <div class="grid">
+      <button class="btn" onclick="go('balance')">Check balance</button>
+      <button class="btn" onclick="go('deposit')">Deposit</button>
+      <button class="btn" onclick="go('withdraw')">Withdraw</button>
+      <button class="btn" onclick="go('history')">History</button>
+      <button class="btn" onclick="go('pin')">Change PIN</button>
+      <button class="btn" onclick="logout()">Logout</button>
+    </div>`}),
+
+  balance: () => ({title:"Current balance", body:`
+    <div class="big">${money(cur.balance)}</div>
+    <button class="btn" onclick="go('menu')">Back</button>`}),
+
+  deposit: () => ({title:"Deposit", body:`
+    <label>Deposit amount (₹)</label><input id="amt" type="number" inputmode="decimal" min="1">
+    <button class="btn primary" onclick="doDeposit()">Deposit</button>
+    <button class="btn" onclick="go('menu')">Back</button>`}),
+
+  withdraw: () => ({title:"Withdraw", body:`
+    <div class="grid">${[500,1000,2000,5000].map(n=>`<button class="btn" onclick="doWithdraw(${n})">₹${n.toLocaleString("en-IN")}</button>`).join("")}</div>
+    <label>Other amount (multiple of ${NOTE}, max ${MAX_WITHDRAW.toLocaleString("en-IN")})</label>
+    <input id="amt" type="number" inputmode="numeric" min="100" step="100">
+    <button class="btn primary" onclick="doWithdraw()">Withdraw</button>
+    <button class="btn" onclick="go('menu')">Back</button>`}),
+
+  history: () => ({title:"Transaction history", body:`
+    <div class="hist"><table>
+      <tr><th>Time</th><th>Type</th><th class="n">Amount</th><th class="n">Balance</th></tr>
+      ${cur.history.slice().reverse().map(h=>`<tr><td>${h.t}</td><td>${h.type}</td><td class="n">${money(h.amt)}</td><td class="n">${money(h.bal)}</td></tr>`).join("")}
+    </table></div>
+    <button class="btn" onclick="go('menu')">Back</button>`}),
+
+  pin: () => ({title:"Change PIN", body:`
+    <label>Current PIN</label><input id="old" type="password" inputmode="numeric" maxlength="4" autocomplete="off">
+    <label>New 4-digit PIN</label><input id="new" type="password" inputmode="numeric" maxlength="4" autocomplete="off">
+    <button class="btn primary" onclick="doPin()">Change PIN</button>
+    <button class="btn" onclick="go('menu')">Back</button>`})
+};
+
+function render(){
+  const v = views[view]();
+  $("#screen").innerHTML = `<h2>${v.title}</h2><div id="msg" class="msg ${msgT}">${esc(msg)}</div>${v.body}`;
+}
+
+async function doGen(){
+  const name=$("#name").value.trim(), pin=$("#pin").value, dep=parseFloat($("#amt").value);
+  if(!name) return flash("Name cannot be empty.");
+  if(!/^\d{4}$/.test(pin)) return flash("PIN must be exactly 4 digits.");
+  if(!(dep>0)) return flash("Opening deposit must be greater than 0.");
+  const card=newCard();
+  const a={card,name,pinHash:await hash(card,pin),balance:dep,failed:0,locked:false,history:[]};
+  log(a,"OPENING DEPOSIT",dep);
+  accounts[card]=a;save();lastCard=card;go("generated");
+}
+
+async function doLogin(){
+  const card=$("#card").value.trim(), pin=$("#pin").value, a=accounts[card];
+  lastCard=card;
+  if(!a) return flash("Card not found.");
+  if(a.locked) return flash("This card is LOCKED. Please contact the bank.");
+  if(await hash(card,pin)===a.pinHash){
+    a.failed=0;save();cur=a;go("menu","Login successful.");
+  }else{
+    a.failed++;
+    const locked=a.failed>=MAX_ATTEMPTS;
+    if(locked) a.locked=true;
+    save();
+    flash(locked?"Too many wrong attempts. Card is now LOCKED.":`Wrong PIN. Attempts left: ${MAX_ATTEMPTS-a.failed}`);
+  }
+}
+
+function doDeposit(){
+  const amt=parseFloat($("#amt").value);
+  if(!(amt>0)) return flash("Amount must be greater than 0.");
+  cur.balance+=amt;log(cur,"DEPOSIT",amt);save();
+  go("menu","Deposited. New balance: "+money(cur.balance));
+}
+
+function doWithdraw(n){
+  const amt = n!==undefined ? n : parseFloat($("#amt").value);
+  if(!(amt>0)) return flash("Amount must be greater than 0.");
+  if(amt%NOTE!==0) return flash(`Amount must be a multiple of ${NOTE}.`);
+  if(amt>MAX_WITHDRAW) return flash(`Limit per transaction is ${MAX_WITHDRAW.toLocaleString("en-IN")}.`);
+  if(amt>cur.balance) return flash("Insufficient balance.");
+  cur.balance-=amt;log(cur,"WITHDRAW",amt);save();
+  go("menu","Please collect your cash. New balance: "+money(cur.balance));
+}
+
+async function doPin(){
+  const o=$("#old").value, n=$("#new").value;
+  if(!/^\d{4}$/.test(n)) return flash("PIN must be exactly 4 digits.");
+  if(await hash(cur.card,o)!==cur.pinHash) return flash("Current PIN is incorrect.");
+  cur.pinHash=await hash(cur.card,n);log(cur,"PIN CHANGED",0);save();
+  go("menu","PIN changed successfully.");
+}
+
+function logout(){cur=null;lastCard="";go("home","Logged out. Please take your card.")}
+
+async function resetAll(){
+  accounts={};cur=null;lastCard="";
+  try{localStorage.removeItem("atm_accounts")}catch(e){}
+  await seed();go("home","All data reset.");
+}
+
+// Enter key presses the main button
+$("#screen").addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&e.target.tagName==="INPUT"){const b=$("#screen .btn.primary");if(b)b.click()}
+});
+
+(async function init(){
+  load();
+  if(!accounts[DEMO]) await seed();
+  render();
+})();
+</script>
+</body>
+</html>
